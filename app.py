@@ -229,7 +229,7 @@ def geo_geocode(name: str, city: Optional[str], api_key: str) -> Optional[Tuple[
             timeout=20,
         )
         r.raise_for_status()
-        js = r.json() | {}
+        js = r.json() or {}
         feats = js.get("features", [])
         if not feats:
             return None
@@ -354,22 +354,44 @@ def load_latest_snapshot(con: sqlite3.Connection, city: str) -> Optional[pd.Data
     df = pd.read_sql_query(q, con, params=[city])
     return df if not df.empty else None
 
+# ------------------------------ Panduan Singkat ------------------------------
+GUIDE_TEXT = """
+**Cara pakai (bahasa mudah):**
+
+**Max competitors (auto mode)**
+- Geser **kiri** = sedikit pesaing → fokus & cepat, tapi bisa ada yang kelewat.
+- Geser **kanan** = banyak pesaing → gambaran lebih lengkap, tapi lebih ramai & agak lambat.
+- Rekomendasi harian: **6–9**. Pitch cepat: **3–5**.
+
+**Auto price band (vs our min)**
+- Angka kiri–kanan = batas harga kompetitor dibanding **harga termurah kita**.
+- Contoh **0.70–1.30** artinya ambil hotel yang harganya **70%–130%** dari harga kita.
+- Sempit (mis. **0.9–1.1**) = mirip-mirip harga; Lebar (mis. **0.6–1.5**) = lebih banyak segmen.
+
+**Parity alert threshold (%)**
+- Batas selisih harga supaya muncul di **Parity Alerts**.
+- Kecil (mis. **3–5%**) = sensitif (banyak alert kecil).
+- Besar (mis. **8–12%**) = hanya selisih besar (cocok laporan eksekutif).
+"""
+
 # ------------------------------ UI ------------------------------------------
 st.set_page_config(page_title="Rate Parity — Any Hotel vs Competitors", layout="wide")
 st.title("🏨 Rate Parity Monitor — Any Hotel vs Competitors")
+with st.expander("Panduan singkat (1 menit baca)"):
+    st.markdown(GUIDE_TEXT)
 
 with st.sidebar:
     st.header("Settings")
     our_name = st.text_input("Hotel name (required)", value=DEFAULT_HOTEL, help="Ketik nama hotel yang mau dibandingkan.")
-    city = st.text_input("City (optional)", value=DEFAULT_CITY, help="Kosongkan untuk auto-try multiple cities.")
+    city = st.text_input("City (optional)", value=DEFAULT_CITY, help="Boleh kosong. Kalau kosong, app akan mencoba beberapa kota di 'Try cities'.")
     try_cities = st.text_input("Try cities (comma, used when City empty)", value=os.getenv("CITY_TRY", DEFAULT_CITY_TRY))
 
     # Auth & Map options
-    jwt = st.text_input("Makcorps JWT", type="password", help="Kosongkan untuk demo (pakai sample data).")
-    geo_key = st.text_input("Geoapify API key", value=os.getenv("GEOAPIFY_KEY", ""), type="password")
+    jwt = st.text_input("Makcorps JWT", type="password", help="Boleh kosong (demo). Jika diisi, app ambil data asli dari Makcorps.")
+    geo_key = st.text_input("Geoapify API key", value=os.getenv("GEOAPIFY_KEY", ""), type="password", help="Untuk peta & cari hotel sekitar.")
     show_map = st.checkbox("Tampilkan peta statis (Geoapify)", value=True)
-    radius_m = st.slider("Radius hotel terdekat (meter)", 5_000, 40_000, DEFAULT_RADIUS_M, 500)
-    max_markers = st.slider("Maksimal marker di peta", 3, 15, 8)
+    radius_m = st.slider("Radius hotel terdekat (meter)", 5_000, 40_000, DEFAULT_RADIUS_M, 500, help="Seberapa jauh peta mencari hotel sekitar dari hotel kamu.")
+    max_markers = st.slider("Maksimal marker di peta", 3, 15, 8, help="Batas jumlah pin kompetitor yang ditampilkan di peta.")
 
 # Manual override (opsional). Kosongkan jika ingin auto-competitor.
 PLACEHOLDER_COMP = "Hotel Neo Malioboro\nIbis Styles Yogyakarta"
@@ -377,14 +399,27 @@ manual_comp = st.text_area(
     "Daftar kompetitor (opsional) - satu per baris",
     value="",
     placeholder=PLACEHOLDER_COMP,
+    help="Jika kosong, sistem akan mencari otomatis kompetitor terdekat via Geoapify."
 ).strip().splitlines()
 
-comp_k = st.slider("Max competitors (auto mode)", min_value=3, max_value=12, value=8)
-band_low, band_high = st.slider("Auto price band (vs our min)", 0.5, 1.8, (0.7, 1.3), 0.05)
-parity_threshold = st.slider("Parity alert threshold (%)", min_value=1, max_value=20, value=5)
+comp_k = st.slider(
+    "Max competitors (auto mode)",
+    min_value=3, max_value=12, value=8,
+    help="Kiri = lebih sedikit & fokus. Kanan = lebih banyak & lengkap. Dampak: makin banyak bisa sedikit lebih lambat dan tabel lebih ramai."
+)
+band_low, band_high = st.slider(
+    "Auto price band (vs our min)",
+    0.5, 1.8, (0.7, 1.3), 0.05,
+    help="Batas harga kompetitor dibanding harga termurah kita. 0.70–1.30 = ambil hotel dengan harga 70%–130% dari kita. Sempit = lebih mirip; lebar = lebih luas."
+)
+parity_threshold = st.slider(
+    "Parity alert threshold (%)",
+    min_value=1, max_value=20, value=5,
+    help="Batas selisih harga untuk muncul di 'Parity Alerts'. Kecil = sensitif (banyak alert kecil). Besar = hanya selisih yang signifikan."
+)
 
 st.divider()
-persist = st.checkbox("Save snapshot to SQLite (for trends)", value=True)
+persist = st.checkbox("Save snapshot to SQLite (for trends)", value=True, help="Simpan data agar bisa lihat tren siapa vendor yang paling sering termurah.")
 db_path = st.text_input("SQLite file", value=DB_DEFAULT)
 if st.button("Fetch Now", type="primary"):
     st.session_state["do_fetch"] = True
