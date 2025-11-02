@@ -768,7 +768,7 @@ if st.session_state.get("do_fetch"):
                 price_band=(band_low, band_high),
                 comp_k=comp_k,
             )
-        st.subheader("AI Insights (Gemini 2.5 Flash)")
+        st.subheader("Insight / Kesimpulan")
         if insight:
             st.markdown(insight)
         else:
