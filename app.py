@@ -275,7 +275,7 @@ with st.sidebar:
     manual_comp = st.text_area(
         "Daftar kompetitor (opsional) - satu per baris",
         value="",
-        placeholder="Hotel A Malioboro
+        placeholder="Hotel A Malioboro"
 Hotel B Prawirotaman",
     ).strip().splitlines()
 
