@@ -275,8 +275,7 @@ with st.sidebar:
     manual_comp = st.text_area(
         "Daftar kompetitor (opsional) - satu per baris",
         value="",
-        placeholder="Hotel A Malioboro
-Hotel B Prawirotaman",
+        placeholder="Hotel A Malioboro\nHotel B Prawirotaman",
     ).strip().splitlines()
 
     comp_k = st.slider("Max competitors (auto mode)", min_value=3, max_value=12, value=8)
@@ -300,8 +299,7 @@ def fetch_for_hotelname(our_name: str, city: str, try_cities_csv: str, jwt: Opti
         if warn:
             warn_all.append(warn)
         our_id = find_hotel_id(df_raw, our_name)
-        return df_raw, city.strip(), fetched_at, "
-".join(warn_all) if warn_all else None, our_id
+        return df_raw, city.strip(), fetched_at, "\n".join(warn_all) if warn_all else None, our_id
 
     # City empty → try multiple
     chosen_city = None
@@ -322,8 +320,13 @@ def fetch_for_hotelname(our_name: str, city: str, try_cities_csv: str, jwt: Opti
         if chosen_df is None:
             chosen_city, chosen_df = c, df_raw
 
-    return chosen_df, chosen_city, last_ts or datetime.now(timezone.utc).isoformat(timespec='seconds'), "
-".join(warn_all) if warn_all else None, chosen_our_id
+    return (
+        chosen_df,
+        chosen_city,
+        last_ts or datetime.now(timezone.utc).isoformat(timespec='seconds'),
+        "\n".join(warn_all) if warn_all else None,
+        chosen_our_id,
+    )
 
 
 if st.session_state.get("do_fetch"):
