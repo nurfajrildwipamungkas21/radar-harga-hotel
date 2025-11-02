@@ -1,8 +1,8 @@
 # app.py
 # =============================================================================
-# Any Hotel → Auto Competitor — Rate Parity Monitor
+# Any Hotel → Auto Competitor — Rate Parity Monitor (+ Gemini Insights)
 # Makcorps Free API (harga) + Geoapify (peta & pencarian hotel terdekat)
-# Streamlit single-file app + optional SQLite snapshot
+# Streamlit single-file app + optional SQLite snapshot + Gemini 2.5 Flash
 # =============================================================================
 
 import os
@@ -16,6 +16,12 @@ import requests
 import streamlit as st
 from urllib.parse import quote
 from math import cos, radians  # untuk jarak approx
+
+# ----------------------------- Demo API Keys (tanam) -------------------------
+# ⚠️ Untuk demo saja. Ganti ke env var untuk produksi.
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyCi19OsrR1lsoN7qs2EU5U4zP-8j_1eHh4")
+MAKCORPS_JWT_DEMO = os.getenv("MAKCORPS_JWT", "69075db1f82e933a8d57fcbd")
+GEOAPIFY_KEY_DEMO = os.getenv("GEOAPIFY_KEY", "4398724ca14044ee93d70a31d0147993")
 
 # ----------------------------- Config ---------------------------------------
 DEFAULT_CITY = ""  # opsional
@@ -143,9 +149,9 @@ def select_competitors(
     manual_list: List[str],
     k: int = 8,
     price_band: Tuple[float, float] = (0.7, 1.3),
-    include_non_hotel: bool = False,
+    include_nonhotel: bool = False,
 ) -> pd.DataFrame:
-    """Ambil comp-set (auto/manual), filter band harga relatif ke hotel kita."""
+    """Ambil comp-set otomatis/manuaI, filter band harga relatif ke hotel kita."""
     agg = (
         df.groupby(["hotel_id", "hotel_name"], as_index=False)["total"]
         .min()
@@ -166,11 +172,11 @@ def select_competitors(
                 .drop_duplicates(subset=["hotel_id"])
                 .reset_index(drop=True)
             )
-            return comp.sort_values("min_total", ascending=True).head(k)
+            return comp
 
-    # Auto: filter kategori
+    # Auto: buang kategori non-hotel (opsional)
     comp = agg.copy()
-    if not include_non_hotel:
+    if not include_nonhotel:
         comp = comp[comp["hotel_name"].str.contains("hotel", case=False, na=False)]
         for bad in ["hostel", "homestay", "guest house", "capsule", "apartment", "kost", "villa"]:
             comp = comp[~comp["hotel_name"].str.contains(bad, case=False, na=False)]
@@ -183,7 +189,7 @@ def select_competitors(
     if our_id:
         comp = comp[comp["hotel_id"] != our_id]
 
-    return comp.sort_values("min_total", ascending=True).head(k).reset_index(drop=True)
+    return comp.sort_values("min_total").head(k).reset_index(drop=True)
 
 
 def compute_metrics(df: pd.DataFrame, our_id: Optional[str], our_manual_total: Optional[float]) -> Tuple[pd.DataFrame, Optional[float]]:
@@ -206,8 +212,8 @@ def compute_metrics(df: pd.DataFrame, our_id: Optional[str], our_manual_total: O
     else:
         best["pct_above_us"] = None
 
-    # Urutkan murni dari termurah → termahal
-    return best.sort_values("min_total", ascending=True).reset_index(drop=True), our_total
+    # Sort: kita dulu, lalu kompetitor termurah → termahal
+    return best.sort_values(["is_us", "min_total"], ascending=[False, True]).reset_index(drop=True), our_total
 
 
 def price_index(our_total: float, comp_min_totals: List[float]) -> Optional[float]:
@@ -242,7 +248,7 @@ def geo_geocode(name: str, city: Optional[str], api_key: str) -> Optional[Tuple[
         return None
 
 
-def geo_places_nearby(center: Tuple[float, float], api_key: str, radius: int = DEFAULT_RADIUS_M, limit: int = 16) -> List[Dict[str, object]]:
+def geo_places_nearby(center: Tuple[float, float], api_key: str, radius: int = DEFAULT_RADIUS_M, limit: int = 24) -> List[Dict[str, object]]:
     """Cari hotel terdekat dari titik center (lon, lat) dalam radius meter."""
     if not api_key:
         return []
@@ -389,13 +395,15 @@ with st.sidebar:
     city = st.text_input("City (optional)", value=DEFAULT_CITY, help="Boleh kosong. Kalau kosong, app akan mencoba beberapa kota di 'Try cities'.")
     try_cities = st.text_input("Try cities (comma, used when City empty)", value=os.getenv("CITY_TRY", DEFAULT_CITY_TRY))
 
-    # Auth & Map options
-    jwt = st.text_input("Makcorps JWT", type="password", help="Boleh kosong (demo). Jika diisi, app ambil data asli dari Makcorps.")
-    geo_key = st.text_input("Geoapify API key", value=os.getenv("GEOAPIFY_KEY", ""), type="password", help="Untuk peta & cari hotel sekitar.")
+    # Auth & Map options (pakai demo keys bawaan; tetap bisa diganti via env var)
+    st.caption("🔐 Makcorps & Geoapify menggunakan DEMO key yang sudah ditanam.")
+    jwt = MAKCORPS_JWT_DEMO
+    geo_key = GEOAPIFY_KEY_DEMO
+
     show_map = st.checkbox("Tampilkan peta statis (Geoapify)", value=True)
     radius_m = st.slider("Radius hotel terdekat (meter)", 5_000, 40_000, DEFAULT_RADIUS_M, 500, help="Seberapa jauh peta mencari hotel sekitar dari hotel kamu.")
-    max_markers = st.slider("Maksimal marker di peta", 3, 15, 8, help="Batas jumlah pin kompetitor yang ditampilkan di peta.")
-    include_non_hotel = st.checkbox("Sertakan non-hotel (homestay/guest house, dll.)", value=False)
+    max_markers = st.slider("Maksimal marker di peta", 3, 24, 15, help="Batas jumlah pin kompetitor yang ditampilkan di peta.")
+    include_nonhotel = st.checkbox("Sertakan non-hotel (homestay/guest house, dll.)", value=False)
 
 # Manual override (opsional). Kosongkan jika ingin auto-competitor.
 PLACEHOLDER_COMP = "Hotel Neo Malioboro\nIbis Styles Yogyakarta"
@@ -409,24 +417,32 @@ manual_comp = st.text_area(
 comp_k = st.slider(
     "Max competitors (auto mode)",
     min_value=3, max_value=12, value=8,
-    help="Kiri = lebih sedikit & fokus. Kanan = lebih banyak & lengkap. Dampak: makin banyak bisa sedikit lebih lambat dan tabel lebih ramai."
+    help="Kiri = lebih sedikit & fokus. Kanan = lebih banyak & lengkap."
 )
 band_low, band_high = st.slider(
     "Auto price band (vs our min)",
     0.5, 1.8, (0.7, 1.3), 0.05,
-    help="Batas harga kompetitor dibanding harga termurah kita. 0.70–1.30 = ambil hotel dengan harga 70%–130% dari kita. Sempit = lebih mirip; lebar = lebih luas."
+    help="Batas harga kompetitor dibanding harga termurah kita. 0.70–1.30 = ambil hotel dengan harga 70%–130% dari kita."
 )
 parity_threshold = st.slider(
     "Parity alert threshold (%)",
     min_value=1, max_value=20, value=5,
-    help="Batas selisih harga untuk muncul di 'Parity Alerts'. Kecil = sensitif (banyak alert kecil). Besar = hanya selisih yang signifikan."
+    help="Batas selisih harga untuk muncul di 'Parity Alerts'."
 )
 
 st.divider()
 persist = st.checkbox("Save snapshot to SQLite (for trends)", value=True, help="Simpan data agar bisa lihat tren siapa vendor yang paling sering termurah.")
 db_path = st.text_input("SQLite file", value=DB_DEFAULT)
+
+col_ai = st.columns([1, 1, 2])
+with col_ai[0]:
+    want_ai = st.checkbox("Generate AI insights (Gemini)", value=True)
+with col_ai[1]:
+    auto_ai = st.checkbox("Auto after fetch", value=True)
+
 if st.button("Fetch Now", type="primary"):
     st.session_state["do_fetch"] = True
+    st.session_state["do_ai"] = want_ai and auto_ai
 
 # --------------------------- Fetch & Logic ----------------------------------
 
@@ -466,6 +482,86 @@ def fetch_for_hotelname(our_name: str, city: str, try_cities_csv: str, jwt: Opti
         chosen_our_id,
     )
 
+# ------------------------------ Gemini helper --------------------------------
+
+def gemini_insights(summary_df: pd.DataFrame,
+                    our_total: Optional[float],
+                    price_index_val: Optional[float],
+                    parity_df: Optional[pd.DataFrame],
+                    city: Optional[str],
+                    our_name: str,
+                    price_band: Tuple[float, float],
+                    comp_k: int) -> Optional[str]:
+    """Panggil Gemini 2.5 Flash untuk merangkum & memberi rekomendasi singkat (ID)."""
+    if not GEMINI_API_KEY:
+        return None
+
+    # Siapkan ringkasan data untuk prompt
+    top_rows = summary_df.copy()
+    cols = ["hotel_name", "min_vendor", "min_total", "pct_above_us"]
+    if "pct_above_us" not in top_rows.columns:
+        top_rows["pct_above_us"] = None
+    top_rows = top_rows[cols].head(20)
+
+    table_txt = "\n".join(
+        f"- {r.hotel_name} | {r.min_vendor} | {r.min_total} | pct_vs_us={round(r.pct_above_us*100,2) if pd.notnull(r.pct_above_us) else 'n/a'}%"
+        for r in top_rows.itertuples(index=False)
+    )
+
+    parity_txt = ""
+    if parity_df is not None and not parity_df.empty:
+        parity_txt = "\n".join(
+            f"  * ALERT: {r.hotel_name} — {r.min_vendor} — total={r.min_total} — gap_vs_us%={round(r['gap_vs_us']*100,2)}"
+            for _, r in parity_df.iterrows()
+        )
+
+    prompt = f"""
+Anda adalah analis revenue management hotel. Jelaskan singkat dalam bahasa Indonesia yang mudah dipahami.
+
+Hotel kita: "{our_name}" di kota "{city or '-'}".
+Harga termurah kita saat ini: {our_total if our_total is not None else 'n/a'}.
+Price Index (vs rata-rata kompetitor = 100): {round(price_index_val,1) if price_index_val else 'n/a'}.
+Auto competitor setting: max={comp_k}, price_band={price_band[0]}–{price_band[1]}.
+
+Tabel ringkas (Hotel | Vendor Termurah | Total | % vs kita):
+{table_txt}
+
+Parity Alerts (jika ada):
+{parity_txt or '(tidak ada alert di atas ambang yang ditetapkan)'}
+
+Tulis:
+1) 4–6 poin insight inti (tren harga, siapa paling agresif, posisi kita vs pasar).
+2) 3–5 rekomendasi aksi praktis (mis. sesuaikan harga, bundling, channel khusus).
+3) Satu kalimat ringkas 'takeaway' eksekutif.
+Jangan gunakan istilah teknis berat; langsung to the point.
+"""
+
+    try:
+        # Prefer SDK baru
+        try:
+            from google import genai
+            client = genai.Client(api_key=GEMINI_API_KEY)
+            resp = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+            )
+            text = getattr(resp, "output_text", None)
+            if text:
+                return text
+        except Exception:
+            pass
+
+        # Fallback ke SDK lama
+        import google.generativeai as genai_old
+        genai_old.configure(api_key=GEMINI_API_KEY)
+        model = genai_old.GenerativeModel("gemini-2.5-flash")
+        resp = model.generate_content(prompt)
+        text = getattr(resp, "text", None)
+        return text
+    except Exception as e:
+        st.info(f"(AI insight non-aktif: {e})")
+        return None
+
 # ------------------------------ Run -----------------------------------------
 
 if st.session_state.get("do_fetch"):
@@ -492,11 +588,11 @@ if st.session_state.get("do_fetch"):
     center: Optional[Tuple[float, float]] = None
     auto_comp_names: List[str] = []
     places: List[Dict[str, object]] = []
-    if show_map and geo_key:
-        center = geo_geocode(our_name, chosen_city or city, geo_key)
+    if show_map and GEOAPIFY_KEY_DEMO:
+        center = geo_geocode(our_name, chosen_city or city, GEOAPIFY_KEY_DEMO)
         if center:
             # Ambil hotel terdekat dalam radius (fallback kuat bila nama tidak match)
-            places = geo_places_nearby(center, geo_key, radius=radius_m, limit=max_markers + 8)
+            places = geo_places_nearby(center, GEOAPIFY_KEY_DEMO, radius=radius_m, limit=max_markers + 8)
             # Buat daftar nama kompetitor resmi (hindari nama yang sama dengan kita)
             core_tokens = [t for t in our_name.lower().split() if len(t) >= 4]
             for p in places:
@@ -524,7 +620,7 @@ if st.session_state.get("do_fetch"):
         df_raw, our_id,
         manual_list=chosen_list,
         k=comp_k, price_band=(band_low, band_high),
-        include_non_hotel=include_non_hotel,
+        include_nonhotel=include_nonhotel
     )
 
     work_ids = set(comp_df["hotel_id"]) if not comp_df.empty else set()
@@ -562,7 +658,7 @@ if st.session_state.get("do_fetch"):
         st.metric("Competitors", str(len(comp_only)))
 
     # -------- Geoapify Static Map (pusat + kompetitor) --------
-    if show_map and geo_key:
+    if show_map and GEOAPIFY_KEY_DEMO:
         st.subheader("Peta hotel sekitar (Geoapify)")
         try:
             if center:
@@ -591,7 +687,7 @@ if st.session_state.get("do_fetch"):
                 # Jika belum cukup, coba geocode nama kompetitor yang dipakai di tabel
                 if added < max_markers and chosen_list:
                     for nm in chosen_list:
-                        co = geo_geocode(nm, chosen_city or city, geo_key)
+                        co = geo_geocode(nm, chosen_city or city, GEOAPIFY_KEY_DEMO)
                         if not co:
                             continue
                         if _dist_m(center[0], center[1], co[0], co[1]) < 80:
@@ -604,7 +700,7 @@ if st.session_state.get("do_fetch"):
                         if added >= max_markers:
                             break
 
-                map_url = build_static_map_url(center, markers, geo_key, width=900, height=520, zoom=14.0)
+                map_url = build_static_map_url(center, markers, GEOAPIFY_KEY_DEMO, width=900, height=520, zoom=14.0)
                 st.image(map_url, caption="Legenda: ⭐ magenta = hotel kita • 🏨 hijau = kompetitor")
             else:
                 st.info("Koordinat hotel tidak ditemukan untuk peta (geocoder tidak menemukan nama).")
@@ -613,19 +709,19 @@ if st.session_state.get("do_fetch"):
 
     # -------- Parity Alerts --------
     thr = parity_threshold / 100.0
+    parity_hot = None
     if our_total is not None:
         st.subheader("Parity Alerts")
         alerts = summary[~summary["is_us"]].copy()
         alerts["gap_vs_us"] = (alerts["min_total"] - our_total) / max(our_total, 1e-9)
-        hot = alerts[alerts["gap_vs_us"].abs() > thr].copy()
-        if hot.empty:
+        parity_hot = alerts[alerts["gap_vs_us"].abs() > thr].copy()
+        if parity_hot.empty:
             st.success("No parity alerts above threshold.")
         else:
-            # tampilkan dari termurah → termahal
-            hot = hot.sort_values("min_total", ascending=True)
-            hot["gap_vs_us(%)"] = (hot["gap_vs_us"] * 100).round(2)
+            parity_hot = parity_hot.sort_values("gap_vs_us")
+            parity_hot["gap_vs_us(%)"] = (parity_hot["gap_vs_us"] * 100).round(2)
             st.dataframe(
-                hot[["hotel_name", "min_vendor", "min_total", "gap_vs_us(%)"]]
+                parity_hot[["hotel_name", "min_vendor", "min_total", "gap_vs_us(%)"]]
                 .rename(columns={"hotel_name": "Hotel", "min_vendor": "Cheapest Vendor", "min_total": "Cheapest Total"}),
                 use_container_width=True,
             )
@@ -659,7 +755,25 @@ if st.session_state.get("do_fetch"):
         except Exception as e:
             st.warning(f"Trend query failed: {e}")
 
+    # -------- Gemini Insights --------
+    if want_ai and (st.session_state.get("do_ai") or st.button("Generate AI Insights now")):
+        with st.spinner("Menulis insight singkat dengan Gemini…"):
+            insight = gemini_insights(
+                summary_df=summary,
+                our_total=our_total,
+                price_index_val=pi,
+                parity_df=parity_hot,
+                city=chosen_city,
+                our_name=our_name,
+                price_band=(band_low, band_high),
+                comp_k=comp_k,
+            )
+        st.subheader("AI Insights (Gemini 2.5 Flash)")
+        if insight:
+            st.markdown(insight)
+        else:
+            st.info("Gemini belum dapat digunakan (library belum terpasang atau API error).")
     st.caption("Note: Free API uses random future date & max 30 hotels/city. City auto-try loops over your list until the hotel is found (fuzzy match).")
 
 else:
-    st.info("Isi nama hotel di sidebar (city opsional), masukkan Geoapify API key + (opsional) Makcorps JWT, lalu klik **Fetch Now**.")
+    st.info("Isi nama hotel di sidebar (city opsional), lalu klik **Fetch Now**. Peta & data harga memakai DEMO keys yang sudah ditanam (bisa diganti ke env var untuk produksi).")
