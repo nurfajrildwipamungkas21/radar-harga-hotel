@@ -1,3 +1,10 @@
 streamlit>=1.38
 pandas>=2.0
 requests>=2.31
+
+# Gemini (pakai salah satu yang tersedia; kode kita support keduanya)
+google-genai        # SDK baru: from google import genai
+google-generativeai # SDK lama: import google.generativeai
+
+# (opsional, tapi bagus punya)
+altair>=5           # untuk chart Streamlit yang mulus di beberapa environment
