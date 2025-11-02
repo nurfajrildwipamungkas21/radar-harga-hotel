@@ -143,8 +143,9 @@ def select_competitors(
     manual_list: List[str],
     k: int = 8,
     price_band: Tuple[float, float] = (0.7, 1.3),
+    include_non_hotel: bool = False,
 ) -> pd.DataFrame:
-    """Ambil comp-set otomatis/manuaI, filter band harga relatif ke hotel kita."""
+    """Ambil comp-set (auto/manual), filter band harga relatif ke hotel kita."""
     agg = (
         df.groupby(["hotel_id", "hotel_name"], as_index=False)["total"]
         .min()
@@ -165,13 +166,14 @@ def select_competitors(
                 .drop_duplicates(subset=["hotel_id"])
                 .reset_index(drop=True)
             )
-            return comp
+            return comp.sort_values("min_total", ascending=True).head(k)
 
-    # Auto: buang kategori non-hotel
+    # Auto: filter kategori
     comp = agg.copy()
-    comp = comp[comp["hotel_name"].str.contains("hotel", case=False, na=False)]
-    for bad in ["hostel", "homestay", "guest house", "capsule", "apartment", "kost", "villa"]:
-        comp = comp[~comp["hotel_name"].str.contains(bad, case=False, na=False)]
+    if not include_non_hotel:
+        comp = comp[comp["hotel_name"].str.contains("hotel", case=False, na=False)]
+        for bad in ["hostel", "homestay", "guest house", "capsule", "apartment", "kost", "villa"]:
+            comp = comp[~comp["hotel_name"].str.contains(bad, case=False, na=False)]
 
     if our_id and our_id in set(comp["hotel_id"]):
         our_price = float(comp.loc[comp["hotel_id"] == our_id, "min_total"].min())
@@ -181,7 +183,7 @@ def select_competitors(
     if our_id:
         comp = comp[comp["hotel_id"] != our_id]
 
-    return comp.sort_values("min_total").head(k).reset_index(drop=True)
+    return comp.sort_values("min_total", ascending=True).head(k).reset_index(drop=True)
 
 
 def compute_metrics(df: pd.DataFrame, our_id: Optional[str], our_manual_total: Optional[float]) -> Tuple[pd.DataFrame, Optional[float]]:
@@ -204,7 +206,8 @@ def compute_metrics(df: pd.DataFrame, our_id: Optional[str], our_manual_total: O
     else:
         best["pct_above_us"] = None
 
-    return best.sort_values(["is_us", "min_total"], ascending=[False, True]).reset_index(drop=True), our_total
+    # Urutkan murni dari termurah → termahal
+    return best.sort_values("min_total", ascending=True).reset_index(drop=True), our_total
 
 
 def price_index(our_total: float, comp_min_totals: List[float]) -> Optional[float]:
@@ -392,6 +395,7 @@ with st.sidebar:
     show_map = st.checkbox("Tampilkan peta statis (Geoapify)", value=True)
     radius_m = st.slider("Radius hotel terdekat (meter)", 5_000, 40_000, DEFAULT_RADIUS_M, 500, help="Seberapa jauh peta mencari hotel sekitar dari hotel kamu.")
     max_markers = st.slider("Maksimal marker di peta", 3, 15, 8, help="Batas jumlah pin kompetitor yang ditampilkan di peta.")
+    include_non_hotel = st.checkbox("Sertakan non-hotel (homestay/guest house, dll.)", value=False)
 
 # Manual override (opsional). Kosongkan jika ingin auto-competitor.
 PLACEHOLDER_COMP = "Hotel Neo Malioboro\nIbis Styles Yogyakarta"
@@ -519,7 +523,8 @@ if st.session_state.get("do_fetch"):
     comp_df = select_competitors(
         df_raw, our_id,
         manual_list=chosen_list,
-        k=comp_k, price_band=(band_low, band_high)
+        k=comp_k, price_band=(band_low, band_high),
+        include_non_hotel=include_non_hotel,
     )
 
     work_ids = set(comp_df["hotel_id"]) if not comp_df.empty else set()
@@ -616,7 +621,8 @@ if st.session_state.get("do_fetch"):
         if hot.empty:
             st.success("No parity alerts above threshold.")
         else:
-            hot = hot.sort_values("gap_vs_us")
+            # tampilkan dari termurah → termahal
+            hot = hot.sort_values("min_total", ascending=True)
             hot["gap_vs_us(%)"] = (hot["gap_vs_us"] * 100).round(2)
             st.dataframe(
                 hot[["hotel_name", "min_vendor", "min_total", "gap_vs_us(%)"]]
