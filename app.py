@@ -273,10 +273,10 @@ with st.sidebar:
     jwt = st.text_input("Makcorps JWT", type="password", help="Kosongkan untuk demo (pakai sample data).")
 
     manual_comp = st.text_area(
-        "Manual competitor list (optional) — one per line",
+        "Daftar kompetitor (opsional) - satu per baris",
         value="",
         placeholder="Hotel A Malioboro
-Hotel B Prawirotaman"
+Hotel B Prawirotaman",
     ).strip().splitlines()
 
     comp_k = st.slider("Max competitors (auto mode)", min_value=3, max_value=12, value=8)
