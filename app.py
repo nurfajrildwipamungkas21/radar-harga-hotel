@@ -1,14 +1,10 @@
 # app.py
 # =============================================================================
 # Any Hotel → Auto Competitor — Rate Parity Monitor (Makcorps Free API)
-# Streamlit single-file app + optional SQLite + Geoapify Static Map
+# Streamlit single-file app + optional SQLite + Geoapify Static Map/Places
 # =============================================================================
 
-from __future__ import annotations
-
 import os
-import json
-import time
 import sqlite3
 import difflib
 from datetime import datetime, timezone
@@ -27,6 +23,7 @@ VENDOR_RATES_TABLE = "vendor_rates"
 DEFAULT_CITY_TRY = (
     "yogyakarta, sleman, bantul, depok, kasihan, jakarta, bandung, surabaya, denpasar"
 )
+DEFAULT_RADIUS_M = 25_000  # 25 km untuk Geoapify Places
 
 SAMPLE_DATA = [
     [
@@ -39,7 +36,7 @@ SAMPLE_DATA = [
         ],
     ],
     [
-        {"hotelName": "Hotel A Malioboro", "hotelId": "a1"},
+        {"hotelName": "Hotel Neo Malioboro", "hotelId": "a1"},
         [
             {"price1": "24", "tax1": "3", "vendor1": "Booking.com"},
             {"price2": "26", "tax2": "0", "vendor2": "Priceline"},
@@ -47,16 +44,10 @@ SAMPLE_DATA = [
         ],
     ],
     [
-        {"hotelName": "Hotel B Prawirotaman", "hotelId": "b2"},
+        {"hotelName": "Ibis Styles Yogyakarta", "hotelId": "b2"},
         [
             {"price1": "28", "tax1": "3", "vendor1": "Booking.com"},
             {"price2": "27", "tax2": "3", "vendor2": "Trip.com"},
-        ],
-    ],
-    [
-        {"hotelName": "C Homestay", "hotelId": "c3"},
-        [
-            {"price1": "18", "tax1": "2", "vendor1": "Booking.com"}
         ],
     ],
 ]
@@ -157,7 +148,7 @@ def select_competitors(
         .rename(columns={"total": "min_total"})
     )
 
-    # Manual: cocokkan fuzzy per baris input
+    # Jika ada manual_list → match fuzzy
     if manual_list:
         chosen = []
         for target in manual_list:
@@ -245,12 +236,40 @@ def geo_geocode(name: str, city: Optional[str], api_key: str) -> Optional[Tuple[
         return None
 
 
+def geo_places_nearby(center: Tuple[float, float], api_key: str, radius: int = DEFAULT_RADIUS_M, limit: int = 16) -> List[Dict[str, object]]:
+    """Cari hotel terdekat dari titik center (lon, lat) dalam radius meter."""
+    if not api_key:
+        return []
+    lon, lat = center
+    try:
+        r = requests.get(
+            "https://api.geoapify.com/v2/places",
+            params={
+                "categories": "accommodation.hotel",
+                "filter": f"circle:{lon},{lat},{radius}",
+                "bias": f"proximity:{lon},{lat}",
+                "limit": limit,
+                "apiKey": api_key,
+            },
+            timeout=20,
+        )
+        r.raise_for_status()
+        out: List[Dict[str, object]] = []
+        for f in (r.json() or {}).get("features", []):
+            lon2, lat2 = f["geometry"]["coordinates"]
+            name = (f.get("properties") or {}).get("name") or "Hotel"
+            out.append({"name": name, "lon": float(lon2), "lat": float(lat2)})
+        return out
+    except Exception:
+        return []
+
+
 def build_static_map_url(
     center: Tuple[float, float],
     markers: List[Dict[str, object]],
     api_key: str,
-    width: int = 800,
-    height: int = 480,
+    width: int = 900,
+    height: int = 520,
     zoom: float = 14.0,
 ) -> str:
     """Bangun URL Geoapify Static Map dengan markers."""
@@ -333,15 +352,16 @@ with st.sidebar:
 
     # Auth & Map options
     jwt = st.text_input("Makcorps JWT", type="password", help="Kosongkan untuk demo (pakai sample data).")
-    default_geo = st.secrets.get("GEOAPIFY_KEY", os.getenv("GEOAPIFY_KEY", ""))
-    geo_key = st.text_input("Geoapify API key (optional)", value=default_geo, type="password")
+    geo_key = st.text_input("Geoapify API key", value=os.getenv("GEOAPIFY_KEY", ""), type="password")
     show_map = st.checkbox("Tampilkan peta statis (Geoapify)", value=True)
-    max_markers = st.slider("Maksimal marker di peta", 3, 12, 6)
+    radius_m = st.slider("Radius hotel terdekat (meter)", 5_000, 40_000, DEFAULT_RADIUS_M, 500)
+    max_markers = st.slider("Maksimal marker di peta", 3, 15, 8)
 
+    # Manual override (opsional). Kosongkan jika ingin auto-competitor.
     manual_comp = st.text_area(
         "Daftar kompetitor (opsional) - satu per baris",
         value="",
-        placeholder="Hotel A Malioboro\nHotel B Prawirotaman",
+        placeholder="Hotel Neo Malioboro\nIbis Styles Yogyakarta",
     ).strip().splitlines()
 
     comp_k = st.slider("Max competitors (auto mode)", min_value=3, max_value=12, value=8)
@@ -416,21 +436,53 @@ if st.session_state.get("do_fetch"):
         except Exception as e:
             st.warning(f"Failed to save snapshot: {e}")
 
-    # Jika hotel kita tidak ketemu di data kota
+    # Geocode pusat hotel (untuk peta & auto-competitor)
+    center = None
+    auto_comp_names: List[str] = []
+    places: List[Dict[str, object]] = []
+    if show_map and geo_key:
+        center = geo_geocode(our_name, chosen_city or city, geo_key)
+        if center:
+            # Ambil hotel terdekat dalam radius (fallback kuat bila nama tidak match)
+            places = geo_places_nearby(center, geo_key, radius=radius_m, limit=max_markers + 8)
+            # Buat daftar nama kompetitor resmi (hindari nama yang sama dengan kita)
+            for p in places:
+                nm = str(p.get("name") or "").strip()
+                if nm and fuzzy_score(nm, our_name) < 0.85:
+                    auto_comp_names.append(nm)
+            # Unik & trim ke max_markers
+            auto_comp_names = list(dict.fromkeys(auto_comp_names))[:max_markers]
+
+    # Jika hotel kita tidak ketemu di data kota → masih bisa manual rate
     our_manual_total = None
     if not our_id:
-        st.warning("Hotel name not found in fetched city results. You can still compare using manual comp-set and manual rate.")
+        st.warning("Hotel name not found in fetched city results. You can still compare using auto/manual comp-set and manual rate.")
         our_manual_total = st.number_input("Manual 'our hotel' total rate (price+tax)", min_value=0.0, value=26.0, step=0.5)
 
-    # Comp-set
-    comp_df = select_competitors(df_raw, our_id, [x for x in manual_comp if x.strip()], k=comp_k, price_band=(band_low, band_high))
+    # Gunakan manual_comp jika diisi; jika kosong → pakai auto_comp_names dari Places
+    chosen_list = [x for x in manual_comp if x.strip()] or auto_comp_names
+
+    # Tampilkan daftar kompetitor yang dipakai
+    with st.expander("Daftar kompetitor yang digunakan (auto/manual)"):
+        if chosen_list:
+            st.write(chosen_list)
+        else:
+            st.write("Tidak ada kompetitor terdeteksi. Isi manual atau pastikan Geoapify key aktif.")
+
+    # Comp-set untuk tabel
+    comp_df = select_competitors(
+        df_raw, our_id,
+        manual_list=chosen_list,
+        k=comp_k, price_band=(band_low, band_high)
+    )
+
     work_ids = set(comp_df["hotel_id"]) if not comp_df.empty else set()
     if our_id:
         work_ids.add(our_id)
     subset = df_raw[df_raw["hotel_id"].isin(work_ids)].copy()
 
     if subset.empty and our_manual_total is None:
-        st.error("No data to display. Add manual competitors or try another city.")
+        st.error("No data to display. Tambah kompetitor manual atau coba kota lain.")
         st.stop()
 
     summary, our_total = compute_metrics(subset, our_id, our_manual_total)
@@ -458,30 +510,55 @@ if st.session_state.get("do_fetch"):
             st.metric("Price Index (vs avg comp-set=100)", f"{pi:.1f}")
         st.metric("Competitors", str(len(comp_only)))
 
-    # -------- Geoapify Static Map (opsional) --------
+    # -------- Geoapify Static Map (pusat + kompetitor) --------
     if show_map and geo_key:
         st.subheader("Peta hotel sekitar (Geoapify)")
         try:
-            base_city = chosen_city or city
-            center = geo_geocode(our_name, base_city, geo_key)
             if center:
-                markers = [{"lon": center[0], "lat": center[1], "type": "awesome", "color": "#bb3f73", "icon": "building"}]
-                comp_names = summary.loc[~summary["is_us"], "hotel_name"].head(max_markers).tolist()
-                for nm in comp_names:
-                    co = geo_geocode(nm, base_city, geo_key)
-                    if co:
-                        markers.append({"lon": co[0], "lat": co[1], "type": "material", "color": "#4c905a", "icon": "hotel"})
-                map_url = build_static_map_url(center, markers, geo_key)
+                # pin pusat (hotel kita)
+                markers: List[Dict[str, object]] = [{
+                    "lon": center[0], "lat": center[1],
+                    "type": "awesome", "color": "#bb3f73", "icon": "building"
+                }]
+
+                # Utamakan marker dari Places (sudah ada koordinat)
+                added = 0
+                for p in places:
+                    nm = str(p.get("name") or "")
+                    if not nm or fuzzy_score(nm, our_name) >= 0.85:
+                        continue
+                    markers.append({
+                        "lon": p["lon"], "lat": p["lat"],
+                        "type": "material", "color": "#4c905a", "icon": "hotel"
+                    })
+                    added += 1
+                    if added >= max_markers:
+                        break
+
+                # Jika belum cukup, coba geocode nama kompetitor yang dipakai di tabel
+                if added < max_markers and chosen_list:
+                    for nm in chosen_list:
+                        co = geo_geocode(nm, chosen_city or city, geo_key)
+                        if co:
+                            markers.append({
+                                "lon": co[0], "lat": co[1],
+                                "type": "material", "color": "#4c905a", "icon": "hotel"
+                            })
+                            added += 1
+                            if added >= max_markers:
+                                break
+
+                map_url = build_static_map_url(center, markers, geo_key, width=900, height=520, zoom=14.0)
                 st.image(map_url, caption="Geoapify static map (pusat = hotel kamu)")
             else:
-                st.info("Koordinat hotel tidak ditemukan untuk peta.")
+                st.info("Koordinat hotel tidak ditemukan untuk peta (geocoder tidak menemukan nama).")
         except Exception as e:
             st.warning(f"Gagal memuat peta Geoapify: {e}")
 
     # -------- Parity Alerts --------
+    thr = parity_threshold / 100.0
     if our_total is not None:
         st.subheader("Parity Alerts")
-        thr = parity_threshold / 100.0
         alerts = summary[~summary["is_us"]].copy()
         alerts["gap_vs_us"] = (alerts["min_total"] - our_total) / max(our_total, 1e-9)
         hot = alerts[alerts["gap_vs_us"].abs() > thr].copy()
@@ -528,4 +605,4 @@ if st.session_state.get("do_fetch"):
     st.caption("Note: Free API uses random future date & max 30 hotels/city. City auto-try loops over your list until the hotel is found (fuzzy match).")
 
 else:
-    st.info("Isi nama hotel di sidebar (city opsional), lalu klik **Fetch Now** untuk mulai.")
+    st.info("Isi nama hotel di sidebar (city opsional), masukkan Geoapify API key + (opsional) Makcorps JWT, lalu klik **Fetch Now**.")
