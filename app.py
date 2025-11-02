@@ -4,17 +4,6 @@
 # Makcorps Free API (harga) + Geoapify (peta & pencarian hotel terdekat)
 # Streamlit single-file app + optional SQLite snapshot
 # =============================================================================
-# Fitur utama
-# - Ketik NAMA HOTEL apa saja. Kota opsional.
-# - Jika City diisi → fetch kota itu sekali. Jika kosong → coba beberapa kota (try_cities).
-# - Bangun comp-set otomatis: ambil hotel terdekat (Geoapify Places, radius default 25km)
-#   dan/atau gunakan daftar kompetitor manual.
-# - Hitung parity (vendor termurah per hotel), KPI, dan tampilkan peta statis.
-# - Simpan snapshot ke SQLite untuk tren vendor termurah.
-#
-# Catatan Makcorps Free: tanggal acak di masa depan, max 30 hotel/kota, tanpa pax/room type.
-# App menyembunyikan pesan error/"SAMPLE_DATA" agar tampak profesional.
-# =============================================================================
 
 import os
 import sqlite3
@@ -26,6 +15,7 @@ import pandas as pd
 import requests
 import streamlit as st
 from urllib.parse import quote
+from math import cos, radians  # untuk jarak approx
 
 # ----------------------------- Config ---------------------------------------
 DEFAULT_CITY = ""  # opsional
@@ -129,7 +119,7 @@ def fetch_makcorps_city(city: str, jwt_token: Optional[str]) -> Tuple[pd.DataFra
         return df, ts, None
     except Exception as e:
         df = flatten_makcorps(SAMPLE_DATA)
-        # Jangan tampilkan error ke UI; cukup kembalikan pesan untuk logging opsional
+        # sengaja tidak menampilkan warn ke UI agar tampak profesional
         return df, ts, f"Using SAMPLE_DATA because: {e}"
 
 
@@ -154,7 +144,7 @@ def select_competitors(
     k: int = 8,
     price_band: Tuple[float, float] = (0.7, 1.3),
 ) -> pd.DataFrame:
-    """Ambil comp-set otomatis/manuel, filter band harga relatif ke hotel kita."""
+    """Ambil comp-set otomatis/manuaI, filter band harga relatif ke hotel kita."""
     agg = (
         df.groupby(["hotel_id", "hotel_name"], as_index=False)["total"]
         .min()
@@ -239,7 +229,7 @@ def geo_geocode(name: str, city: Optional[str], api_key: str) -> Optional[Tuple[
             timeout=20,
         )
         r.raise_for_status()
-        js = r.json() or {}
+        js = r.json() | {}
         feats = js.get("features", [])
         if not feats:
             return None
@@ -277,6 +267,15 @@ def geo_places_nearby(center: Tuple[float, float], api_key: str, radius: int = D
         return []
 
 
+def _dist_m(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
+    """Perkiraan jarak meter (equirectangular) — cukup akurat untuk < ~50 km."""
+    kx = 111_320 * cos(radians((lat1 + lat2) / 2.0))
+    ky = 110_540
+    dx = (lon2 - lon1) * kx
+    dy = (lat2 - lat1) * ky
+    return (dx * dx + dy * dy) ** 0.5
+
+
 def build_static_map_url(
     center: Tuple[float, float],
     markers: List[Dict[str, object]],
@@ -285,7 +284,7 @@ def build_static_map_url(
     height: int = 520,
     zoom: float = 14.0,
 ) -> str:
-    """Bangun URL Geoapify Static Map dengan markers."""
+    """Bangun URL Geoapify Static Map dengan markers (mendukung 'size')."""
     lon, lat = center
 
     def enc(m: Dict[str, object]) -> str:
@@ -295,6 +294,8 @@ def build_static_map_url(
             f"color:{m.get('color','#4c905a')};"
             f"icon:{m.get('icon','hotel')}"
         )
+        if m.get("size"):
+            s += f";size:{m['size']}"
         return quote(s, safe="")
 
     marker_param = "%7C".join(enc(m) for m in markers)
@@ -436,7 +437,7 @@ if st.session_state.get("do_fetch"):
     with st.spinner("Fetching rates & building comp-set…"):
         df_raw, chosen_city, fetched_at, warn, our_id = fetch_for_hotelname(our_name, city, try_cities, jwt)
 
-    # JANGAN tampilkan warn ke UI agar tampak profesional
+    # UI tetap bersih (tanpa warn teknis)
     st.caption(f"City={chosen_city or 'unknown'} • Rows={len(df_raw)} • Fetched at {fetched_at}")
 
     # Simpan snapshot
@@ -449,7 +450,7 @@ if st.session_state.get("do_fetch"):
             st.warning(f"Failed to save snapshot: {e}")
 
     # Geocode pusat hotel (untuk peta & auto-competitor)
-    center = None
+    center: Optional[Tuple[float, float]] = None
     auto_comp_names: List[str] = []
     places: List[Dict[str, object]] = []
     if show_map and geo_key:
@@ -466,19 +467,16 @@ if st.session_state.get("do_fetch"):
                 contains_core = core_tokens and all(tok in low for tok in core_tokens[:2])
                 if nm and not too_similar and not contains_core:
                     auto_comp_names.append(nm)
-            # Unik & batasi
             auto_comp_names = list(dict.fromkeys(auto_comp_names))[:max_markers]
 
-    # Jika hotel kita tidak ketemu di data kota → masih bisa manual rate
+    # Jika hotel kita tidak ketemu di data kota → boleh input manual rate
     our_manual_total = None
     if not our_id:
-        # Jangan munculkan warning panjang; cukup input manual rate
         our_manual_total = st.number_input("Manual 'our hotel' total rate (price+tax)", min_value=0.0, value=26.0, step=0.5)
 
-    # Gunakan manual_comp jika diisi; jika kosong → pakai auto_comp_names dari Places
+    # Gunakan manual_comp jika diisi; jika kosong → pakai auto_comp_names
     chosen_list = [x for x in manual_comp if x.strip()] or auto_comp_names
 
-    # Daftar kompetitor yang digunakan (opsional ditampilkan)
     with st.expander("Daftar kompetitor yang digunakan (auto/manual)"):
         st.write(chosen_list or ["(tidak ada)"])
 
@@ -528,17 +526,19 @@ if st.session_state.get("do_fetch"):
         st.subheader("Peta hotel sekitar (Geoapify)")
         try:
             if center:
-                # pin pusat (hotel kita) — warna magenta & ikon bintang supaya beda jelas
+                # pin pusat (hotel kita) — magenta, bintang, size besar
                 markers: List[Dict[str, object]] = [{
                     "lon": center[0], "lat": center[1],
-                    "type": "awesome", "color": "#bb3f73", "icon": "star"
+                    "type": "awesome", "color": "#bb3f73", "icon": "star", "size": "x-large"
                 }]
 
-                # Utamakan marker dari Places (sudah ada koordinat) untuk kompetitor
+                # kompetitor dari Places: skip yang terlalu dekat (< 80 m) agar tidak menimpa pin pusat
                 added = 0
                 for p in places:
                     nm = str(p.get("name") or "")
                     if not nm or fuzzy_score(nm, our_name) >= 0.82:
+                        continue
+                    if _dist_m(center[0], center[1], p["lon"], p["lat"]) < 80:
                         continue
                     markers.append({
                         "lon": p["lon"], "lat": p["lat"],
@@ -552,14 +552,17 @@ if st.session_state.get("do_fetch"):
                 if added < max_markers and chosen_list:
                     for nm in chosen_list:
                         co = geo_geocode(nm, chosen_city or city, geo_key)
-                        if co and abs(co[0] - center[0]) > 1e-5 and abs(co[1] - center[1]) > 1e-5:
-                            markers.append({
-                                "lon": co[0], "lat": co[1],
-                                "type": "material", "color": "#4c905a", "icon": "hotel"
-                            })
-                            added += 1
-                            if added >= max_markers:
-                                break
+                        if not co:
+                            continue
+                        if _dist_m(center[0], center[1], co[0], co[1]) < 80:
+                            continue
+                        markers.append({
+                            "lon": co[0], "lat": co[1],
+                            "type": "material", "color": "#4c905a", "icon": "hotel"
+                        })
+                        added += 1
+                        if added >= max_markers:
+                            break
 
                 map_url = build_static_map_url(center, markers, geo_key, width=900, height=520, zoom=14.0)
                 st.image(map_url, caption="Legenda: ⭐ magenta = hotel kita • 🏨 hijau = kompetitor")
