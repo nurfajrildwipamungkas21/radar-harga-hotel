@@ -370,23 +370,23 @@ with st.sidebar:
     radius_m = st.slider("Radius hotel terdekat (meter)", 5_000, 40_000, DEFAULT_RADIUS_M, 500)
     max_markers = st.slider("Maksimal marker di peta", 3, 15, 8)
 
-    # Manual override (opsional). Kosongkan jika ingin auto-competitor.
-    manual_comp = st.text_area(
-        "Daftar kompetitor (opsional) - satu per baris",
-        value="",
-        placeholder="Hotel Neo Malioboro
-Ibis Styles Yogyakarta",
-    ).strip().splitlines()
+# Manual override (opsional). Kosongkan jika ingin auto-competitor.
+PLACEHOLDER_COMP = "Hotel Neo Malioboro\nIbis Styles Yogyakarta"
+manual_comp = st.text_area(
+    "Daftar kompetitor (opsional) - satu per baris",
+    value="",
+    placeholder=PLACEHOLDER_COMP,
+).strip().splitlines()
 
-    comp_k = st.slider("Max competitors (auto mode)", min_value=3, max_value=12, value=8)
-    band_low, band_high = st.slider("Auto price band (vs our min)", 0.5, 1.8, (0.7, 1.3), 0.05)
-    parity_threshold = st.slider("Parity alert threshold (%)", min_value=1, max_value=20, value=5)
+comp_k = st.slider("Max competitors (auto mode)", min_value=3, max_value=12, value=8)
+band_low, band_high = st.slider("Auto price band (vs our min)", 0.5, 1.8, (0.7, 1.3), 0.05)
+parity_threshold = st.slider("Parity alert threshold (%)", min_value=1, max_value=20, value=5)
 
-    st.divider()
-    persist = st.checkbox("Save snapshot to SQLite (for trends)", value=True)
-    db_path = st.text_input("SQLite file", value=DB_DEFAULT)
-    if st.button("Fetch Now", type="primary"):
-        st.session_state["do_fetch"] = True
+st.divider()
+persist = st.checkbox("Save snapshot to SQLite (for trends)", value=True)
+db_path = st.text_input("SQLite file", value=DB_DEFAULT)
+if st.button("Fetch Now", type="primary"):
+    st.session_state["do_fetch"] = True
 
 # --------------------------- Fetch & Logic ----------------------------------
 
@@ -398,8 +398,7 @@ def fetch_for_hotelname(our_name: str, city: str, try_cities_csv: str, jwt: Opti
         if warn:
             warn_all.append(warn)
         our_id = find_hotel_id(df_raw, our_name)
-        return df_raw, city.strip(), fetched_at, "
-".join(warn_all) if warn_all else None, our_id
+        return df_raw, city.strip(), fetched_at, ("\n".join(warn_all) if warn_all else None), our_id
 
     # City kosong → coba beberapa kota
     chosen_city: Optional[str] = None
@@ -423,8 +422,7 @@ def fetch_for_hotelname(our_name: str, city: str, try_cities_csv: str, jwt: Opti
         chosen_df,
         chosen_city,
         last_ts or datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "
-".join(warn_all) if warn_all else None,
+        ("\n".join(warn_all) if warn_all else None),
         chosen_our_id,
     )
 
