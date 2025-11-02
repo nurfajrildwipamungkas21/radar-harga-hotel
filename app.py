@@ -276,7 +276,7 @@ with st.sidebar:
         "Daftar kompetitor (opsional) - satu per baris",
         value="",
         placeholder="Hotel A Malioboro"
-Hotel B Prawirotaman",
+"Hotel B Prawirotaman",
     ).strip().splitlines()
 
     comp_k = st.slider("Max competitors (auto mode)", min_value=3, max_value=12, value=8)
